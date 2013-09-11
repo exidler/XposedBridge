@@ -1,11 +1,12 @@
 package de.robv.android.xposed.callbacks;
 
-import java.io.Serializable;
-import java.util.Iterator;
-import java.util.TreeSet;
-
 import android.os.Bundle;
 import de.robv.android.xposed.XposedBridge;
+
+import java.io.Serializable;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.TreeSet;
 
 public abstract class XCallback implements Comparable<XCallback> {
 	public final int priority;
@@ -24,7 +25,7 @@ public abstract class XCallback implements Comparable<XCallback> {
 		 * @see #getObjectExtra
 		 * @see #setObjectExtra
 		 */
-		public final Bundle extra = new Bundle();
+		public Bundle extra;
 		
 		protected Param() {
 			callbacks = null;
@@ -39,6 +40,7 @@ public abstract class XCallback implements Comparable<XCallback> {
 		
 		/** @see #setObjectExtra */
 		public Object getObjectExtra(String key) {
+			if (extra == null) return null;
 			Serializable o = extra.getSerializable(key);
 			if (o instanceof SerializeWrapper)
 				return ((SerializeWrapper) o).object;
@@ -47,6 +49,7 @@ public abstract class XCallback implements Comparable<XCallback> {
 		
 		/** Provides a wrapper to store <code>Object</code>s in <code>extra</code>. */
 		public void setObjectExtra(String key, Object o) {
+			if (extra == null) extra = new Bundle();
 			extra.putSerializable(key, new SerializeWrapper(o));
 		}
 		
@@ -88,6 +91,15 @@ public abstract class XCallback implements Comparable<XCallback> {
 			return 1;
 	}
 	
+	public static class PriorityComparator implements Comparator<XCallback> {
+		@Override
+		public int compare(XCallback c1, XCallback c2) {
+			return c1.compareTo(c2);
+		}
+	}
+
+	public static final PriorityComparator PRIORITY_COMPARATOR = new PriorityComparator();
+
 	public static final int PRIORITY_DEFAULT = 50;
 	/** Call this handler last */
 	public static final int PRIORITY_LOWEST = -10000;

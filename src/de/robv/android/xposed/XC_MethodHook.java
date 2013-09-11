@@ -1,9 +1,9 @@
 package de.robv.android.xposed;
 
-import java.lang.reflect.Member;
-
 import de.robv.android.xposed.callbacks.IXUnhook;
 import de.robv.android.xposed.callbacks.XCallback;
+
+import java.lang.reflect.Member;
 
 public abstract class XC_MethodHook extends XCallback {
 	public XC_MethodHook() {
@@ -36,9 +36,9 @@ public abstract class XC_MethodHook extends XCallback {
 		/** Arguments to the method call */
 		public Object[] args;
 		
-		private Object result = null;
-		private Throwable throwable = null;
-		/* package */ boolean returnEarly = false;
+		public Object result = null;
+		public Throwable throwable = null;
+		public boolean returnEarly = false;
 		
 		/** Returns the result of the method call */
 		public Object getResult() {

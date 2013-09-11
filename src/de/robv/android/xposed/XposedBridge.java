@@ -1,35 +1,5 @@
 package de.robv.android.xposed;
 
-import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
-import static de.robv.android.xposed.XposedHelpers.getBooleanField;
-import static de.robv.android.xposed.XposedHelpers.getIntField;
-import static de.robv.android.xposed.XposedHelpers.getObjectField;
-import static de.robv.android.xposed.XposedHelpers.setObjectField;
-import static de.robv.android.xposed.XposedHelpers.setStaticObjectField;
-
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
-import java.lang.ref.WeakReference;
-import java.lang.reflect.AccessibleObject;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Member;
-import java.lang.reflect.Method;
-import java.text.DateFormat;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeSet;
-
 import android.app.ActivityThread;
 import android.app.AndroidAppHelper;
 import android.app.LoadedApk;
@@ -42,10 +12,9 @@ import android.content.res.XResources;
 import android.os.Build;
 import android.os.Process;
 import android.util.Log;
-
+import android.util.SparseArray;
 import com.android.internal.os.RuntimeInit;
 import com.android.internal.os.ZygoteInit;
-
 import dalvik.system.PathClassLoader;
 import de.robv.android.xposed.XC_MethodHook.MethodHookParam;
 import de.robv.android.xposed.callbacks.XC_InitPackageResources;
@@ -54,7 +23,103 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 import de.robv.android.xposed.callbacks.XCallback;
 
+import java.io.*;
+import java.lang.ref.WeakReference;
+import java.lang.reflect.*;
+import java.text.DateFormat;
+import java.util.*;
+
+import static de.robv.android.xposed.XposedHelpers.*;
+
 public final class XposedBridge {
+
+	private static class MethodIdMember implements Member {
+		public final int methodId;
+		public final Member method;
+		public final Class<?> clazz;
+		public final String name;
+		public final Class<?>[] params;
+		public final Class<?> returnType;
+
+		public MethodIdMember(Member method) {
+			this.methodId = getMethodId(method);
+			this.method = method;
+			this.clazz = method.getDeclaringClass();
+			this.name = method.getName();
+
+			if (method instanceof Method) {
+				params = ((Method)method).getParameterTypes();
+				returnType = ((Method)method).getReturnType();
+			} else if (method instanceof Constructor) {
+				params = ((Constructor<?>)method).getParameterTypes();
+				returnType = null;
+			} else {
+				throw new IllegalArgumentException("method must be of type Method or Constructor");
+			}
+		}
+
+		public MethodIdMember(int methodId) {
+			this.methodId = methodId;
+			method = null;
+			clazz = null;
+			name = null;
+			params = null;
+			returnType = null;
+		}
+
+		@Override
+		public Class<?> getDeclaringClass() {
+			return clazz;
+		}
+
+		@Override
+		public int getModifiers() {
+			return 0;
+		}
+
+		@Override
+		public String getName() {
+			return name;
+		}
+
+		@Override
+		public boolean isSynthetic() {
+			return false;
+		}
+
+		@Override
+		public boolean equals(Object obj) {
+			if (obj instanceof MethodIdMember) {
+				MethodIdMember o = (MethodIdMember)obj;
+				if (o.clazz != clazz || o.returnType != returnType || !name.equals(o.name)) return false;
+				if (params.length != o.params.length) return false;
+				int l = params.length;
+				for (int i=0; i<params.length; i++) {
+					if (params[i] != o.params[i]) return false;
+				}
+				return true;
+			} else if (obj instanceof Member) {
+				return method.equals(obj);
+			}
+			return false;
+		}
+
+		@Override
+		public int hashCode() {
+			return name.hashCode();
+		}
+	}
+
+	private static class QuickHookInfo {
+		public final ArrayList<XC_MethodHook> callbacks;
+		public final MethodIdMember m;
+		public QuickHookInfo(Member reflectedMethod) {
+			this.m = new MethodIdMember(reflectedMethod);
+			this.callbacks = new ArrayList<XC_MethodHook>();
+		}
+	}
+
+
 	private static PrintWriter logWriter = null;
 	// log for initialization of a few mods is about 500 bytes, so 2*20 kB (2*~350 lines) should be enough
 	private static final int MAX_LOGFILE_SIZE = 20*1024; 
@@ -64,8 +129,7 @@ public final class XposedBridge {
 	public static final ClassLoader BOOTCLASSLOADER = ClassLoader.getSystemClassLoader();
 	
 	// built-in handlers
-	private static final Map<Member, TreeSet<XC_MethodHook>> hookedMethodCallbacks
-									= new HashMap<Member, TreeSet<XC_MethodHook>>();
+	private static final SparseArray<QuickHookInfo> hookedMethodCallbacks = new SparseArray<QuickHookInfo>();
 	private static final TreeSet<XC_LoadPackage> loadedPackageCallbacks = new TreeSet<XC_LoadPackage>();
 	private static final TreeSet<XC_InitPackageResources> initPackageResourcesCallbacks = new TreeSet<XC_InitPackageResources>();
 	
@@ -226,10 +290,10 @@ public final class XposedBridge {
 		}
 		
 		// Replace system resources
-		Resources systemResources = new XResources(Resources.getSystem(), null);
-		setStaticObjectField(Resources.class, "mSystem", systemResources);
+		//Resources systemResources = new XResources(Resources.getSystem(), null);
+		//setStaticObjectField(Resources.class, "mSystem", systemResources);
 		
-		XResources.init();
+		//XResources.init();
 	}
 	
 	/**
@@ -247,7 +311,6 @@ public final class XposedBridge {
 	/**
 	 * Load a module from an APK by calling the init(String) method for all classes defined
 	 * in <code>assets/xposed_init</code>.
-	 * @see MethodSignatureGuide#init
 	 */
 	private static void loadModule(String apk, String startClassName) {
 		log("Loading modules from " + apk);
@@ -353,17 +416,19 @@ public final class XposedBridge {
 		}
 		
 		boolean newMethod = false;
-		TreeSet<XC_MethodHook> callbacks;
+		QuickHookInfo hi;
+		int methodId = getMethodId(hookMethod);
 		synchronized (hookedMethodCallbacks) {
-			callbacks = hookedMethodCallbacks.get(hookMethod);
-			if (callbacks == null) {
-				callbacks = new TreeSet<XC_MethodHook>();
-				hookedMethodCallbacks.put(hookMethod, callbacks);
+			hi = hookedMethodCallbacks.get(methodId);
+			if (hi == null) {
+				hi = new QuickHookInfo(hookMethod);
+				hookedMethodCallbacks.put(methodId, hi);
 				newMethod = true;
 			}
 		}
-		synchronized (callbacks) {
-			callbacks.add(callback);
+		synchronized (hi) {
+			hi.callbacks.add(callback);
+			Collections.sort(hi.callbacks, XCallback.PRIORITY_COMPARATOR);
 		}
 		if (newMethod) {
 			Class<?> declaringClass = hookMethod.getDeclaringClass();
@@ -380,14 +445,15 @@ public final class XposedBridge {
 	 * @param callback The reference to the callback as specified in {@link #hookMethod}
 	 */
 	public static void unhookMethod(Member hookMethod, XC_MethodHook callback) {
-		TreeSet<XC_MethodHook> callbacks;
+		QuickHookInfo hi;
+		int methodId = getMethodId(hookMethod);
 		synchronized (hookedMethodCallbacks) {
-			callbacks = hookedMethodCallbacks.get(hookMethod);
-			if (callbacks == null)
+			hi = hookedMethodCallbacks.get(methodId);
+			if (hi == null)
 				return;
 		}	
-		synchronized (callbacks) {
-			callbacks.remove(callback);
+		synchronized (hi) {
+			hi.callbacks.remove(callback);
 		}
 	}
 	
@@ -410,42 +476,45 @@ public final class XposedBridge {
 	 * This method is called as a replacement for hooked methods.
 	 */
 	@SuppressWarnings("unchecked")
-	private static Object handleHookedMethod(Member method, Object thisObject, Object[] args) throws Throwable {
-		if (disableHooks) {
+	private static Object handleHookedMethod(int methodId, Object thisObject, Object[] args) throws Throwable {
+//		if (disableHooks) {
+//			try {
+//				return invokeOriginalMethod(method, thisObject, args);
+//			} catch (InvocationTargetException e) {
+//				throw e.getCause();
+//			}
+//		}
+
+		QuickHookInfo hi;
+		synchronized (hookedMethodCallbacks) {
+			hi = hookedMethodCallbacks.get(methodId);
+		}
+		if (hi == null || hi.callbacks.isEmpty() || disableHooks) {
 			try {
-				return invokeOriginalMethod(method, thisObject, args);
+				return invokeOriginalMethodId(hi.m, thisObject, args);
 			} catch (InvocationTargetException e) {
 				throw e.getCause();
 			}
 		}
 
-		TreeSet<XC_MethodHook> callbacks;
-		synchronized (hookedMethodCallbacks) {
-			callbacks = hookedMethodCallbacks.get(method);
-		}
-		if (callbacks == null || callbacks.isEmpty()) {
-			try {
-				return invokeOriginalMethod(method, thisObject, args);
-			} catch (InvocationTargetException e) {
-				throw e.getCause();
-			}
-		}
-		synchronized (callbacks) {
-			callbacks = ((TreeSet<XC_MethodHook>) callbacks.clone());
+		XC_MethodHook[] callbacksAr;
+		synchronized (hi) {
+			callbacksAr = hi.callbacks.toArray(new XC_MethodHook[hi.callbacks.size()]);
 		}
 		
 		MethodHookParam param = new MethodHookParam();
-		param.method  = method;
+		param.method = hi.m.method;
 		param.thisObject = thisObject;
 		param.args = args;
 		
-		Iterator<XC_MethodHook> before = callbacks.iterator();
-		Iterator<XC_MethodHook> after  = callbacks.descendingIterator();
+		final int end = callbacksAr.length;
+		int before = 0;
+		int after = end - 1;
 		
 		// call "before method" callbacks
-		while (before.hasNext()) {
+		while (before < end) {
 			try {
-				before.next().beforeHookedMethod(param);
+				callbacksAr[before++].beforeHookedMethod(param);
 			} catch (Throwable t) {
 				XposedBridge.log(t);
 				
@@ -457,9 +526,9 @@ public final class XposedBridge {
 			
 	        if (param.returnEarly) {
 	        	// skip remaining "before" callbacks and corresponding "after" callbacks
-	        	while (before.hasNext() && after.hasNext()) {
-	        		before.next();
-	        		after.next();
+				while (before < end && after >= 0) {
+					before++;
+					after--;
 	        	}
 	        	break;
 	        }
@@ -468,19 +537,21 @@ public final class XposedBridge {
 		// call original method if not requested otherwise
 		if (!param.returnEarly) {
 			try {
-				param.setResult(invokeOriginalMethod(method, param.thisObject, param.args));
+				param.result = invokeOriginalMethodId(hi.m, thisObject, args);
+				param.returnEarly = true;
+				param.throwable = null;
 			} catch (InvocationTargetException e) {
 				param.setThrowable(e.getCause());
 			}
 		}
 		
 		// call "after method" callbacks
-		while (after.hasNext()) {
-			Object lastResult =  param.getResult();
-			Throwable lastThrowable = param.getThrowable();
+		while (after >= 0) {
+			Object lastResult = param.result;
+			Throwable lastThrowable = param.throwable;
 			
 			try {
-				after.next().afterHookedMethod(param);
+				callbacksAr[after--].afterHookedMethod(param);
 			} catch (Throwable t) {
 				XposedBridge.log(t);
 				
@@ -493,10 +564,10 @@ public final class XposedBridge {
 		}
 		
 		// return
-		if (param.hasThrowable())
-			throw param.getThrowable();
+		if (param.throwable != null)
+			throw param.throwable;
 		else
-			return param.getResult();
+			return param.result;
 	}
 
 	/**
@@ -592,13 +663,23 @@ public final class XposedBridge {
 
 	/**
 	 * Intercept every call to the specified method and call a handler function instead.
-	 * @param method The method to intercept
 	 */
 	private native synchronized static void hookMethodNative(Class<?> declaringClass, int slot);
 	
+	private native static int getMethodId(Member reflectedMethod);
+
 	private native static Object invokeOriginalMethodNative(Member method, Class<?>[] parameterTypes, Class<?> returnType, Object thisObject, Object[] args)
     			throws IllegalAccessException, IllegalArgumentException, InvocationTargetException;
 	
+	private static Object invokeOriginalMethodId(MethodIdMember method, Object thisObject, Object[] args)
+			throws NullPointerException, IllegalAccessException, IllegalArgumentException, InvocationTargetException {
+		if (args == null) {
+			args = EMPTY_ARRAY;
+		}
+		return invokeOriginalMethodNative(method.method, method.params, method.returnType, thisObject, args);
+	}
+
+
 	/**
 	 * Basically the same as {@link Method#invoke}, but calls the original method
 	 * as it was before the interception by Xposed. Also, access permissions are not checked.
